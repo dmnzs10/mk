@@ -1,0 +1,73 @@
+#!/bin/bash
+
+USERS="admin avato noc"
+PASSW="senha1 lib6shahco senha2"
+PORTS="22 222"
+DBTI_HOST=""
+DBTI_USER=""
+DBTI_PASS=""
+DBTI_BASE="avisos_mikrotik"
+PORT="222"
+DBDM_HOST=""
+DBDM_USER="bash_script"
+DBDM_PASS=""
+DBDM_BASE="hosts_discovery"
+COMMAND_LINE=$1
+
+# Conecta no banco DM para obter o comando a ser executado
+DBDM_CMD=$(echo "SELECT command_line FROM commands WHERE package='${COMMAND_LINE}'" | mysql -N -h $DBDM_HOST -D $DBDM_BASE -u $DBDM_USER -p${DBDM_PASS}) 
+
+# Conecta no banco da TI para obter a lista dos concentradores
+DBTI_CE=$(echo "SELECT server_ip FROM authentication_concentrators ORDER BY id ASC LIMIT 1" | mysql -N -h $DBTI_HOST -D $DBTI_BASE -u $DBTI_USER -p${DBTI_PASS})
+#DBTI_CE=$(echo "SELECT server_ip FROM authentication_concentrators ORDER BY id ASC" | mysql -N -h $DBTI_HOST -D $DBTI_BASE -u $DBTI_USER -p${DBTI_PASS})
+
+# Inicio
+for HOST in $DBTI_CE; do
+    SSH=0
+    CRED=""
+    PING=""
+    USER=$(echo "SELECT server_user FROM authentication_concentrators WHERE server_ip='${HOST}'" | mysql -N -h $DBTI_HOST -D $DBTI_BASE -u $DBTI_USER -p${DBTI_PASS})
+    PASS=$(echo "SELECT server_password FROM authentication_concentrators WHERE server_ip='${HOST}'" | mysql -N -h $DBTI_HOST -D $DBTI_BASE -u $DBTI_USER -p${DBTI_PASS})
+
+    # grava host no banco DM
+    echo "INSERT INTO host (ipv4,ipv4_var,username,passwd,port) VALUES (INET_ATON('${HOST}'),'${HOST}','${USER}','${PASS}','${PORT}')" | mysql -N -h $DBDM_HOST -D $DBDM_BASE -u $DBDM_USER -p${DBDM_PASS} >/dev/null 2>&1
+
+    # teste de conectividade icmp
+    ping -q -i 0.2 -c 5 ${HOST} >/dev/null 2>&1
+    if [ "$?" = 0 ]; then
+    PING="UP"
+
+      # teste de conexao
+      if [ $SSH -eq 0 ]; then
+        sshpass -p ${PASS} ssh -p ${PORT} -o StrictHostKeyChecking=no ${USER}@${HOST} "/" >/dev/null 2>&1
+        #echo "$?"
+  
+        # retorno do teste de conexao
+        if [ $? -eq 0 ]; then
+          SSH="1"
+          CRED="OK"
+          echo "Passou com ${USER}@${HOST}:${PORT} - $PASS"
+
+          # grava rodada no banco DM
+          echo "INSERT INTO cmd_executions (commands_idcommands,host_ipv4,host_ipv4_var,date) VALUES ('1',INET_ATON('${HOST}'),'${HOST}',NOW()) " | mysql -N -h $DBDM_HOST -D $DBDM_BASE -u $DBDM_USER -p${DBDM_PASS} >/dev/null 2>&1
+
+  		# executar scritp: texto entre os EOF, lembrar dos tabs
+        	#sshpass -p ${PASS} ssh -p ${PORT} -T -o StrictHostKeyChecking=no ${USER}@${HOST} <<-EOF
+		#	EOF
+		# executa script: comandos na variavel
+		sshpass -p ${PASS} ssh -p ${PORT} -T -o StrictHostKeyChecking=no ${USER}@${HOST} "${DBDM_CMD}"
+
+          #echo ""
+        else
+          echo " >>> Nao consegui conectar em ${USER}@${HOST}:${PORT} - $PASS - SSH code: $SSH"
+          CRED="FAIL"
+        fi # retorno do teste de conexao
+
+        # UPDATE das credenciais
+        echo "UPDATE host SET cred_status='${CRED}',cred_date=NOW() WHERE ipv4=(INET_ATON('${HOST}'))" | mysql -N -h $DBDM_HOST -D $DBDM_BASE -u $DBDM_USER -p${DBDM_PASS} >/dev/null 2>&1
+
+      fi # teste de conexao
+    else # teste de conectividade icmp
+      echo "Host is down!"
+    fi # fim do teste de conectividade icmp
+done # fim do for dos hosts
